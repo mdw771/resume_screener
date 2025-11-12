@@ -8,6 +8,7 @@ import openai
 import pandas as pd
 
 
+BASE_URL = "https://api.openai.com/v1"
 REPORT_FILE = "report.csv"
 RESUME_DIR = "resumes"
 MODEL_NAME = "gpt-5-chat-latest"
@@ -146,7 +147,10 @@ def main():
         raise ValueError("OPENAI_API_KEY is not set")
 
     initialize_report()
-    client = openai.OpenAI()
+    client = openai.OpenAI(
+        base_url=BASE_URL,
+        api_key=os.getenv("OPENAI_API_KEY", ""),
+    )
 
     for resume_file in get_resume_files():
         if is_in_report(resume_file):
