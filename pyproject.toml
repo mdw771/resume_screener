@@ -8,3 +8,13 @@ dependencies = [
     "openai>=2.7.2",
     "pandas>=2.3.3",
 ]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project.scripts]
+resume_screener = "main:main"
+
+[tool.setuptools]
+py-modules = ["main"]
