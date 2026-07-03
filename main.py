@@ -6,8 +6,10 @@ import os
 import re
 from pathlib import Path
 from typing import Any, Dict, List
+from urllib.parse import urlsplit, urlunsplit
 
 import openai
+import httpx
 import pandas as pd
 
 REPORT_FILE = "report.csv"
@@ -187,6 +189,42 @@ def evaluate_resume(
             pass
 
 
+def is_asksage_base_url(base_url: str) -> bool:
+    return "asksage" in base_url.lower()
+
+
+def asksage_server_base_url(base_url: str) -> str:
+    parts = urlsplit(base_url)
+    path_parts = [part for part in parts.path.split("/") if part]
+
+    if "server" in path_parts:
+        server_index = path_parts.index("server")
+        path = "/" + "/".join(path_parts[: server_index + 1])
+    else:
+        path = "/" + "/".join([*path_parts, "server"])
+
+    return urlunsplit((parts.scheme, parts.netloc, path.rstrip("/"), "", ""))
+
+
+def extract_json_response(raw_text: str) -> Dict[str, Any]:
+    if not raw_text:
+        raise ValueError("Model returned an empty response.")
+
+    try:
+        return json.loads(raw_text)
+    except json.JSONDecodeError:
+        pass
+
+    match = re.search(r"\{.*\}", raw_text, flags=re.DOTALL)
+    if match is None:
+        raise ValueError(f"Failed to parse model response as JSON: {raw_text}")
+
+    try:
+        return json.loads(match.group(0))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Failed to parse model response as JSON: {raw_text}") from exc
+
+
 def request_evaluation(
     client: openai.OpenAI, file_id: str, prompt: str, model: str
 ) -> Dict[str, Any]:
@@ -207,13 +245,54 @@ def request_evaluation(
 
     raw_text = response_data["output"][-1]["content"][-1]["text"]
 
-    if not raw_text:
-        raise ValueError("Model returned an empty response.")
+    return extract_json_response(raw_text)
 
-    try:
-        return json.loads(raw_text)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Failed to parse model response as JSON: {raw_text}") from exc
+
+def get_asksage_message(response_data: Dict[str, Any]) -> str:
+    message = response_data.get("message")
+    if isinstance(message, str):
+        return message
+
+    response = response_data.get("response")
+    if isinstance(response, str):
+        return response
+    if isinstance(response, dict):
+        nested_response = response.get("response")
+        if isinstance(nested_response, str):
+            return nested_response
+        nested_message = response.get("message")
+        if isinstance(nested_message, str):
+            return nested_message
+
+    raise ValueError(f"Ask Sage response did not contain a message: {response_data}")
+
+
+def request_asksage_evaluation(
+    base_url: str, api_key: str, resume_file: str, prompt: str, model: str
+) -> Dict[str, Any]:
+    url = f"{asksage_server_base_url(base_url)}/query_with_file"
+    data = {
+        "message": prompt,
+        "model": model,
+        "tools": json.dumps(["read_file"]),
+        "tools_to_execute": json.dumps(["read_file"]),
+    }
+
+    with open(resume_file, "rb") as f:
+        files = {"file": (Path(resume_file).name, f, "application/pdf")}
+        response = httpx.post(
+            url,
+            headers={"x-access-tokens": api_key},
+            data=data,
+            files=files,
+            timeout=120,
+        )
+
+    response.raise_for_status()
+    message = get_asksage_message(response.json())
+    if "</file-content>" in message:
+        message = message.split("</file-content>", 1)[1]
+    return extract_json_response(message.strip())
 
 
 def append_to_report(
@@ -241,11 +320,17 @@ def main():
     resume_dir = args.resume_dir
     output_dir = args.output_dir
     report_file = output_dir / REPORT_FILE
+    use_asksage = is_asksage_base_url(args.base_url)
+    api_key = os.getenv("ASKSAGE_API_KEY" if use_asksage else "OPENAI_API_KEY")
+    if use_asksage and api_key is None:
+        api_key = os.getenv("OPENAI_API_KEY")
 
     if not resume_dir.is_dir():
         raise SystemExit(f"error: resume directory does not exist: {resume_dir}")
 
-    if os.getenv("OPENAI_API_KEY") is None:
+    if api_key is None:
+        if use_asksage:
+            raise SystemExit("error: ASKSAGE_API_KEY or OPENAI_API_KEY is not set")
         raise SystemExit("error: OPENAI_API_KEY is not set")
 
     job_posting = read_text_file(args.job_posting, "job posting")
@@ -256,10 +341,12 @@ def main():
 
     output_dir.mkdir(parents=True, exist_ok=True)
     initialize_report(report_file, header)
-    client = openai.OpenAI(
-        base_url=args.base_url,
-        api_key=os.getenv("OPENAI_API_KEY", ""),
-    )
+    client = None
+    if not use_asksage:
+        client = openai.OpenAI(
+            base_url=args.base_url,
+            api_key=api_key,
+        )
 
     for resume_file in get_resume_files(resume_dir):
         if is_in_report(resume_file, report_file):
@@ -267,7 +354,13 @@ def main():
             continue
 
         try:
-            evaluation = evaluate_resume(client, resume_file, prompt, args.model)
+            if use_asksage:
+                evaluation = request_asksage_evaluation(
+                    args.base_url, api_key, resume_file, prompt, args.model
+                )
+            else:
+                assert client is not None
+                evaluation = evaluate_resume(client, resume_file, prompt, args.model)
             append_to_report(resume_file, evaluation, report_file, dimensions)
         except Exception as exc:
             print(f"Failed to process {resume_file}: {exc}")

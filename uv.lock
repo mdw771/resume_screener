@@ -70,12 +70,14 @@ name = "hiring"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "httpx" },
     { name = "openai" },
     { name = "pandas" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "httpx", specifier = ">=0.28.1" },
     { name = "openai", specifier = ">=2.7.2" },
     { name = "pandas", specifier = ">=2.3.3" },
 ]
